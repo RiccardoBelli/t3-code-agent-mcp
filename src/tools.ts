@@ -316,7 +316,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
       const launched = (await api.thread(ids.threadId, 1)).thread;
       // A retry may observe an unfinished bootstrap. Report it, without starting another turn.
-      if (launched.latestTurn) {
+      if (!input.newWorktree || launched.worktreePath) {
         const cwd = launched.worktreePath ?? project.workspaceRoot;
         const actual = await api.listRefs(cwd);
         const currentBranch = actual.refs.find((r) => r.current && !r.isRemote)?.name ?? null;
@@ -324,7 +324,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const mismatch = launched.projectId !== project.id || launched.worktreePath !== expectedPath || currentBranch !== launched.branch ||
           (input.newWorktree && (!launched.worktreePath || (input.newWorktree.branch && launched.branch !== input.newWorktree.branch)));
         if (mismatch) {
-          await api.interruptTurn(randomUUID(), ids.threadId, launched.latestTurn.turnId);
+          if (launched.latestTurn) await api.interruptTurn(randomUUID(), ids.threadId, launched.latestTurn.turnId);
           throw new Error(`Thread ${ids.threadId} has an unexpected branch or working directory; interrupted. Read the thread before continuing.`);
         }
       }
