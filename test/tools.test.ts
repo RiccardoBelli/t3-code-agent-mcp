@@ -298,7 +298,7 @@ describe("inherited worktree launches", () => {
     });
     expect((await call("t3_create_thread", base("inherit"))).error).toBeUndefined();
     expect(created).toHaveLength(1);
-    if (fresh) expect(created[0]).toMatchObject({ newWorktree: { baseBranch: "main", runSetupScript: true, startFromOrigin: override ? false : true } });
+    if (fresh) expect(created[0]).toMatchObject({ newWorktree: { baseBranch: "main", branch: `t3code-${ids.threadId}`, runSetupScript: true, startFromOrigin: override ? false : true } });
     else expect(created[0]).toMatchObject({ branch: "main", worktreePath: null, newWorktree: undefined });
   });
   it("explicit project root overrides worktree mode without reading defaults", async () => {

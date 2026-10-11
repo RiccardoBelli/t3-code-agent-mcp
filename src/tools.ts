@@ -250,7 +250,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         newWorktree: z
           .object({
             baseBranch: z.string().describe("Branch to start from"),
-            branch: z.string().optional().describe("Name for the new branch; T3 generates one when omitted"),
+            branch: z.string().optional().describe("Name for the new branch; the bridge derives one from the launch key when omitted"),
             runSetupScript: z.boolean().optional().describe("Run the project setup script after creating the worktree (default true)"),
           })
           .optional()
@@ -322,11 +322,11 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
                 .join(", ")}`,
             );
           }
-          branch = requestedWorktree.branch ?? null;
+          branch = requestedWorktree.branch ?? `t3code-${ids.threadId}`;
           newWorktree = {
             projectCwd: project.workspaceRoot,
             baseBranch: base.name,
-            ...(requestedWorktree.branch ? { branch: requestedWorktree.branch } : {}),
+            branch,
             runSetupScript: requestedWorktree.runSetupScript ?? true,
             ...(startFromOrigin === undefined ? {} : { startFromOrigin }),
           };

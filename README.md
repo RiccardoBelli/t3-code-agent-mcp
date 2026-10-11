@@ -345,7 +345,7 @@ Returns `[{ harnessId, driver, displayName, usable, reason, status, auth, versio
 | `wait` | Wait for the first turn and return the reply (default false) |
 | `timeoutSeconds` | Max wait, default 300 |
 
-Omit both worktree options to use T3's effective project default. The bridge checks the stored project override, the legacy project value before migration, the environment value, `t3.json`, then `local`, as T3 0.0.45 does. A null project override defers to `t3.json`. Inherited worktrees use the default local branch, or the current branch if there is no default, and respect T3's `newWorktreesStartFromOrigin` setting. Retries keep their original directory even after a default changes. Explicit worktree options take precedence.
+Omit both worktree options to use T3's effective project default. The bridge checks the stored project override, the legacy project value before migration, the environment value, `t3.json`, then `local`, as T3 0.0.45 does. A null project override defers to `t3.json`. An omitted new branch name is derived from the stable launch key because T3 0.0.45 otherwise attempts to check out the already-used base branch. Inherited worktrees use the default local branch, or the current branch if there is no default, and respect T3's `newWorktreesStartFromOrigin` setting. Retries keep their original directory even after a default changes. Explicit worktree options take precedence.
 
 Returns the thread summary plus `reused` (true when the key matched an existing thread) and, with `wait`, `reply` and `timedOut`.
 
