@@ -112,7 +112,7 @@ describe("t3_create_thread", () => {
       },
       thread: async () => detail(threadShell(ids.threadId, null)),
     });
-    const result = await call("t3_create_thread", base("k2"));
+    const result = await call("t3_create_thread", { ...base("k2"), newWorktree: { baseBranch: "main", branch: "feature/new" } });
     expect(result.reused).toBe(true);
     expect(started).toHaveLength(0);
   });
