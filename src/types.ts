@@ -14,11 +14,21 @@ export interface ModelSelection {
 export type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 export type InteractionMode = "default" | "plan";
 
+export type ThreadEnvMode = "local" | "worktree";
+
+export interface ServerSettings {
+  defaultThreadEnvMode: ThreadEnvMode | null;
+  newWorktreesStartFromOrigin: boolean;
+  projectSettingsFolded: boolean;
+  projectSettingsOverrides: Record<string, { defaultThreadEnvMode?: ThreadEnvMode | null; newWorktreesStartFromOrigin?: boolean }>;
+}
+
 export interface ProjectShell {
   id: string;
   title: string;
   workspaceRoot: string;
   defaultModelSelection: ModelSelection | null;
+  defaultThreadEnvMode?: ThreadEnvMode | null;
 }
 
 export interface LatestTurn {

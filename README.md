@@ -337,13 +337,15 @@ Returns `[{ harnessId, driver, displayName, usable, reason, status, auth, versio
 | `title` | Thread title shown in T3 |
 | `prompt` | First user message |
 | `context` | Optional `[{ label?, text }]` blocks appended below the prompt |
-| `worktreePath` | Existing worktree from `t3_list_worktrees`, or the project root (default) |
+| `worktreePath` | Existing worktree from `t3_list_worktrees`, or the project root. Omit both worktree options to inherit T3's effective project default |
 | `newWorktree` | `{ baseBranch, branch?, runSetupScript? }`: ask T3 to create a fresh worktree. Mutually exclusive with `worktreePath` |
 | `runtimeMode` | `approval-required`, `auto-accept-edits`, `auto`, `full-access` (default) |
 | `interactionMode` | `default` or `plan` |
 | `idempotencyKey` | Stable key; retries reuse the same thread |
 | `wait` | Wait for the first turn and return the reply (default false) |
 | `timeoutSeconds` | Max wait, default 300 |
+
+Omit both worktree options to use T3's effective project default. The bridge checks the stored project override, the legacy project value before migration, the environment value, `t3.json`, then `local`, as T3 0.0.45 does. A null project override defers to `t3.json`. Inherited worktrees use the default local branch, or the current branch if there is no default, and respect T3's `newWorktreesStartFromOrigin` setting. Retries keep their original directory even after a default changes. Explicit worktree options take precedence.
 
 Returns the thread summary plus `reused` (true when the key matched an existing thread) and, with `wait`, `reply` and `timedOut`.
 

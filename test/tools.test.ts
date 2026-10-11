@@ -17,7 +17,7 @@ function harness(api: Partial<T3Api>) {
     handlers.set(name, cb);
     return original(name, meta as never, cb as never);
   };
-  registerTools(server, { api: api as T3Api, origin: "http://t3", environmentId: "env-9" });
+  registerTools(server, { api: { settings: async () => ({ defaultThreadEnvMode: "local", newWorktreesStartFromOrigin: true, projectSettingsFolded: true, projectSettingsOverrides: {} }), projectEnvMode: async () => null, ...api } as T3Api, origin: "http://t3", environmentId: "env-9" });
   return async (name: string, args: Record<string, unknown> = {}) => {
     const result = await handlers.get(name)!(args);
     const text = result.content.map((c) => c.text).join("");
@@ -279,5 +279,59 @@ describe("thread settlement", () => {
       interruptTurn: async () => { throw new Error("must not interrupt"); },
     });
     expect((await call("t3_settle_thread", { threadId: "busy", idempotencyKey: "settle-busy" })).error).toBe("Thread is running");
+  });
+});
+
+describe("inherited worktree launches", () => {
+  const defaults = (mode: "local" | "worktree", override?: "local" | "worktree") => ({
+    defaultThreadEnvMode: mode, newWorktreesStartFromOrigin: true, projectSettingsFolded: true,
+    projectSettingsOverrides: override ? { p1: { defaultThreadEnvMode: override, newWorktreesStartFromOrigin: false } } : {},
+  });
+  it.each([["local", undefined, false], ["worktree", "local", false], ["local", "worktree", true], ["worktree", undefined, true]] as const)("global %s, project %s creates fresh=%s", async (mode, override, fresh) => {
+    const ids = commandIds("launch", "inherit");
+    const created: unknown[] = [];
+    const launched = { ...threadShell(ids.threadId, { turnId: "T", state: "running", startedAt: "", completedAt: null, assistantMessageId: null }), ...(fresh ? { branch: "auto", worktreePath: "C:/code/proj-auto" } : {}) };
+    const call = harness({
+      shell: async () => shell([]), config: async () => ({ providers: [provider] }), settings: async () => defaults(mode, override),
+      listRefs: async (cwd) => cwd.endsWith("proj-auto") ? { ...refs, refs: [{ name: "auto", current: true, isDefault: false, worktreePath: cwd }] } : refs,
+      createThreadWithFirstTurn: async (spec) => { created.push(spec); return { sequence: 1 }; }, thread: async () => detail(launched),
+    });
+    expect((await call("t3_create_thread", base("inherit"))).error).toBeUndefined();
+    expect(created).toHaveLength(1);
+    if (fresh) expect(created[0]).toMatchObject({ newWorktree: { baseBranch: "main", runSetupScript: true, startFromOrigin: override ? false : true } });
+    else expect(created[0]).toMatchObject({ branch: "main", worktreePath: null, newWorktree: undefined });
+  });
+  it("explicit project root overrides worktree mode without reading defaults", async () => {
+    const ids = commandIds("launch", "explicit-root");
+    const call = harness({ shell: async () => shell([]), config: async () => ({ providers: [provider] }), settings: async () => { throw Error("must not read defaults"); }, listRefs: async () => refs,
+      createThreadWithFirstTurn: async (spec) => { expect(spec.newWorktree).toBeUndefined(); return { sequence: 1 }; }, thread: async () => detail(threadShell(ids.threadId, null)) });
+    expect((await call("t3_create_thread", { ...base("explicit-root"), worktreePath: "C:/code/proj" })).error).toBeUndefined();
+  });
+  it.each([true, false])("retry retains the original inherited directory, fresh=%s", async (fresh) => {
+    const ids = commandIds("launch", "retry-default");
+    const launched = { ...threadShell(ids.threadId, { turnId: "T", state: "completed", startedAt: "", completedAt: "", assistantMessageId: null }), ...(fresh ? { branch: "auto", worktreePath: "C:/code/proj-auto" } : {}) };
+    const call = harness({ shell: async () => shell([launched]), config: async () => ({ providers: [provider] }), settings: async () => { throw Error("retry must not re-resolve defaults"); },
+      listRefs: async (cwd) => cwd.endsWith("proj-auto") ? { ...refs, refs: [{ name: "auto", current: true, isDefault: false, worktreePath: cwd }] } : refs,
+      createThreadWithFirstTurn: async () => { throw Error("must not launch twice"); }, thread: async () => detail(launched) });
+    expect(await call("t3_create_thread", base("retry-default"))).toMatchObject({ reused: true, branch: fresh ? "auto" : "main", worktreePath: fresh ? "C:/code/proj-auto" : null });
+  });
+  it("a retry before inherited worktree preparation finishes remains inert", async () => {
+    const ids = commandIds("launch", "pending-inherit");
+    const call = harness({ shell: async () => shell([threadShell(ids.threadId, null)]), config: async () => ({ providers: [provider] }),
+      settings: async () => { throw Error("must not resolve"); }, createThreadWithFirstTurn: async () => { throw Error("must not launch"); }, listRefs: async () => { throw Error("must not inspect unfinished worktree"); }, thread: async () => detail(threadShell(ids.threadId, null)) });
+    expect(await call("t3_create_thread", base("pending-inherit"))).toMatchObject({ reused: true, turn: null });
+  });
+  it("interrupts a wrong inherited branch instead of reporting success", async () => {
+    const ids = commandIds("launch", "wrong-inherit");
+    const launched = { ...threadShell(ids.threadId, { turnId: "T", state: "running", startedAt: "", completedAt: null, assistantMessageId: null }), branch: "wanted", worktreePath: "C:/code/proj-auto" };
+    let interrupted = false;
+    const call = harness({ shell: async () => shell([]), config: async () => ({ providers: [provider] }), settings: async () => defaults("worktree"), listRefs: async () => refs,
+      createThreadWithFirstTurn: async () => ({ sequence: 1 }), thread: async () => detail(launched), interruptTurn: async () => { interrupted = true; return { sequence: 2 }; } });
+    expect((await call("t3_create_thread", base("wrong-inherit"))).error).toMatch(/unexpected branch/);
+    expect(interrupted).toBe(true);
+  });
+  it("rejects inherited worktree mode for a non-repository before launching", async () => {
+    const call = harness({ shell: async () => shell([]), config: async () => ({ providers: [provider] }), settings: async () => defaults("worktree"), listRefs: async () => ({ refs: [], isRepo: false, nextCursor: null }), createThreadWithFirstTurn: async () => { throw Error("must not launch"); } });
+    expect((await call("t3_create_thread", base("no-repo"))).error).toMatch(/no local base branch/);
   });
 });

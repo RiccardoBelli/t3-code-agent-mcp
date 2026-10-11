@@ -4,10 +4,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
+import { resolveLaunchDefaults } from "./project-settings.js";
 import { commandIds } from "./ids.js";
 import { registerOrchestrationPromptTool } from "./prompts.js";
 import { normalizePath, resolveExistingWorktree, resolveHarness, resolveModel, resolveProject, unusableReason } from "./resolve.js";
-import type { T3Api } from "./t3.js";
+import type { T3Api, ThreadCreateSpec } from "./t3.js";
 import type { Message, ModelSelection, ThreadDetailSnapshot, ThreadShell } from "./types.js";
 
 const DEFAULT_HARNESS = "claudeAgent";
@@ -233,7 +234,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Create a T3 thread and send the first prompt",
       description:
-        "Create a new thread in T3, then send the first prompt. Defaults to claudeAgent / claude-opus-5-5 with medium effort. Explicit harness and model choices override these defaults. The thread appears in the T3 UI. Nothing is substituted: unknown or unusable choices fail with the valid options. Pass the same idempotencyKey on retries to guarantee a single launch; a key whose command T3 rejected is burned and needs a new key.",
+        "Create a new thread in T3, then send the first prompt. Defaults to claudeAgent / claude-opus-5-5 with medium effort. Explicit harness and model choices override these defaults. Omitting both worktree options inherits T3's project/environment default. Explicit worktree options override it. The thread appears in the T3 UI. Nothing is substituted: unknown or unusable choices fail with the valid options. Pass the same idempotencyKey on retries to guarantee a single launch; a key whose command T3 rejected is burned and needs a new key.",
       inputSchema: {
         project: z.string().describe("Project id, exact title, or workspace root (see t3_list_projects)"),
         harness: z.string().optional().describe("Harness id from t3_list_harnesses. Default claudeAgent; other harnesses require an explicit model."),
@@ -245,7 +246,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         worktreePath: z
           .string()
           .optional()
-          .describe("Existing worktree path from t3_list_worktrees, or the project root. Default: project root."),
+          .describe("Existing worktree path from t3_list_worktrees, or the project root. Omit both worktree options to inherit T3's effective project default."),
         newWorktree: z
           .object({
             baseBranch: z.string().describe("Branch to start from"),
@@ -284,6 +285,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const text = composeMessage(input.prompt, input.context);
 
       const existing = shell.threads.find((t) => t.id === ids.threadId);
+      let expectsFreshWorktree = !!input.newWorktree;
       if (existing) {
         if (existing.projectId !== project.id || existing.modelSelection.instanceId !== harness.instanceId || existing.modelSelection.model !== model.slug) {
           throw new Error("idempotencyKey belongs to a different launch. Read the existing thread; do not reuse this key for another request.");
@@ -297,23 +299,36 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         const refs = await api.listRefs(project.workspaceRoot);
         let branch: string | null = null;
         let worktreePath: string | null = null;
-        let newWorktree: { projectCwd: string; baseBranch: string; branch?: string; runSetupScript: boolean } | undefined;
-        if (input.newWorktree) {
-          const base = refs.refs.find((r) => !r.isRemote && r.name === input.newWorktree!.baseBranch);
+        let newWorktree: ThreadCreateSpec["newWorktree"];
+        let requestedWorktree = input.newWorktree;
+        let startFromOrigin: boolean | undefined;
+        if (!input.worktreePath && !requestedWorktree) {
+          const defaults = await resolveLaunchDefaults(await api.settings(), project, () => api.projectEnvMode(project.workspaceRoot));
+          if (defaults.envMode === "worktree") {
+            const base = refs.refs.find((r) => !r.isRemote && r.isDefault) ?? refs.refs.find((r) => !r.isRemote && r.current);
+            if (!refs.isRepo || !base) throw new Error("T3 defaults to a new worktree, but this project has no local base branch. Pass an explicit project-root worktreePath to run locally.");
+            requestedWorktree = { baseBranch: base.name, runSetupScript: true };
+            startFromOrigin = defaults.startFromOrigin;
+            expectsFreshWorktree = true;
+          }
+        }
+        if (requestedWorktree) {
+          const base = refs.refs.find((r) => !r.isRemote && r.name === requestedWorktree!.baseBranch);
           if (!base) {
             throw new Error(
-              `baseBranch "${input.newWorktree.baseBranch}" is not a local branch of ${project.title}. Known: ${refs.refs
+              `baseBranch "${requestedWorktree.baseBranch}" is not a local branch of ${project.title}. Known: ${refs.refs
                 .filter((r) => !r.isRemote)
                 .map((r) => r.name)
                 .join(", ")}`,
             );
           }
-          branch = input.newWorktree.branch ?? null;
+          branch = requestedWorktree.branch ?? null;
           newWorktree = {
             projectCwd: project.workspaceRoot,
             baseBranch: base.name,
-            ...(input.newWorktree.branch ? { branch: input.newWorktree.branch } : {}),
-            runSetupScript: input.newWorktree.runSetupScript ?? true,
+            ...(requestedWorktree.branch ? { branch: requestedWorktree.branch } : {}),
+            runSetupScript: requestedWorktree.runSetupScript ?? true,
+            ...(startFromOrigin === undefined ? {} : { startFromOrigin }),
           };
         } else {
           const choice = resolveExistingWorktree(project, refs.refs, input.worktreePath ?? project.workspaceRoot);
@@ -335,25 +350,31 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       }
 
       const launched = (await api.thread(ids.threadId, 1)).thread;
-      // A retry may observe an unfinished bootstrap. Report it, without starting another turn.
-      if (!input.newWorktree || launched.worktreePath) {
+      const verify = async (launched: ThreadShell | ThreadDetailSnapshot["thread"]) => {
+        // No turn/path can be an unfinished inherited worktree bootstrap on retry.
+        if (!launched.latestTurn && !launched.worktreePath && (expectsFreshWorktree || (existing && !input.worktreePath))) return;
         const cwd = launched.worktreePath ?? project.workspaceRoot;
         const actual = await api.listRefs(cwd);
         const currentBranch = actual.refs.find((r) => r.current && !r.isRemote)?.name ?? null;
-        const expectedPath = input.newWorktree ? launched.worktreePath : resolveExistingWorktree(project, (await api.listRefs(project.workspaceRoot)).refs, input.worktreePath ?? project.workspaceRoot).worktreePath;
+        const expectedPath = input.worktreePath
+          ? resolveExistingWorktree(project, (await api.listRefs(project.workspaceRoot)).refs, input.worktreePath).worktreePath
+          : existing || expectsFreshWorktree ? launched.worktreePath : null;
         const mismatch = launched.projectId !== project.id || launched.worktreePath !== expectedPath || currentBranch !== launched.branch ||
-          (input.newWorktree && (!launched.worktreePath || (input.newWorktree.branch && launched.branch !== input.newWorktree.branch)));
+          (expectsFreshWorktree && !launched.worktreePath) ||
+          (input.newWorktree?.branch && launched.branch !== input.newWorktree.branch);
         if (mismatch) {
           if (launched.latestTurn) await api.interruptTurn(randomUUID(), ids.threadId, launched.latestTurn.turnId);
           throw new Error(`Thread ${ids.threadId} has an unexpected branch or working directory; interrupted. Read the thread before continuing.`);
         }
-      }
+      };
+      await verify(launched);
 
       const base = { reused: existing !== undefined, idempotencyKey: ids.idempotencyKey };
       if (input.wait) {
         const { snapshot, timedOut } = await api.waitForTurnSettled(ids.threadId, (input.timeoutSeconds ?? WAIT_DEFAULT_SECONDS) * 1000, {
           expectedMessageId: ids.messageId,
         });
+        await verify(snapshot.thread);
         return { ...base, ...turnResult(snapshot, ctx, timedOut) };
       }
       return { ...base, ...summarizeThread((await api.thread(ids.threadId, 1)).thread, ctx) };

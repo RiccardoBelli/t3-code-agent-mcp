@@ -136,3 +136,20 @@ describe("waitForTurnSettled", () => {
     await expect(new T3Api(fake.conn).thread("t1")).rejects.toThrow(/contract may have changed/);
   });
 });
+
+describe("launch settings RPCs", () => {
+  it("passes inherited origin choice into T3's durable bootstrap", async () => {
+    const fake = fakeConn([], []);
+    let command: Record<string, unknown> | undefined;
+    fake.conn.rpc.call = async <T>(_tag: string, payload: unknown) => { command = payload as Record<string, unknown>; return { sequence: 1 } as T; };
+    await new T3Api(fake.conn).createThreadWithFirstTurn({ commandId: "c", threadId: "t", messageId: "m", projectId: "p", title: "t", text: "go", modelSelection: { instanceId: "claudeAgent", model: "m" }, runtimeMode: "full-access", interactionMode: "default", branch: null, worktreePath: null,
+      newWorktree: { projectCwd: "/repo", baseBranch: "main", runSetupScript: true, startFromOrigin: false } });
+    expect(command).toMatchObject({ bootstrap: { prepareWorktree: { projectCwd: "/repo", baseBranch: "main", requireWorktree: true, startFromOrigin: false }, runSetupScript: true } });
+  });
+  it("does not treat failed settings authentication as a local default", async () => {
+    const fake = fakeConn([], []);
+    fake.conn.rpc.call = async () => { throw Error("authentication failed"); };
+    await expect(new T3Api(fake.conn).settings()).rejects.toThrow(/authentication failed/);
+    await expect(new T3Api(fake.conn).projectEnvMode("/repo")).rejects.toThrow(/authentication failed/);
+  });
+});

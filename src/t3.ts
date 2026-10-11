@@ -1,7 +1,8 @@
+import { parseProjectEnvMode } from "./project-settings.js";
 import { discoverServer, type DiscoveredServer } from "./discovery.js";
 import { resolveAccessToken } from "./credentials.js";
 import { makeHttpClient, type HttpClient } from "./http.js";
-import { T3RpcClient } from "./rpc.js";
+import { T3RpcClient, T3RpcError } from "./rpc.js";
 import {
   assertThreadShape,
   type DispatchResult,
@@ -9,6 +10,7 @@ import {
   type ModelSelection,
   type RuntimeMode,
   type ServerConfig,
+  type ServerSettings,
   type ShellSnapshot,
   type ThreadDetailSnapshot,
   type VcsListRefsResult,
@@ -44,7 +46,7 @@ export interface ThreadCreateSpec {
   branch: string | null;
   worktreePath: string | null;
   text: string;
-  newWorktree?: { projectCwd: string; baseBranch: string; branch?: string; runSetupScript: boolean };
+  newWorktree?: { projectCwd: string; baseBranch: string; branch?: string; runSetupScript: boolean; startFromOrigin?: boolean };
 }
 
 export interface TurnStartSpec {
@@ -94,6 +96,22 @@ export class T3Api {
     return this.conn.rpc.call<ServerConfig>("server.getConfig", {});
   }
 
+  settings(): Promise<ServerSettings> {
+    return this.conn.rpc.call<ServerSettings>("server.getSettings", {});
+  }
+
+  async projectEnvMode(cwd: string) {
+    try {
+      const file = await this.conn.rpc.call<{ contents: string; truncated: boolean }>("projects.readFile", { cwd, relativePath: "t3.json" });
+      return file.truncated ? null : parseProjectEnvMode(file.contents);
+    } catch (error) {
+      // Like T3, missing or unreadable optional project files use the built-in default.
+      // Authentication and transport failures must still fail the launch.
+      if (error instanceof T3RpcError && error.tag === "ProjectReadFileError") return null;
+      throw error;
+    }
+  }
+
   /** All local refs for a checkout. T3 pages at 200, so follow `nextCursor` until it is null. */
   async listRefs(cwd: string): Promise<VcsListRefsResult> {
     const refs: VcsListRefsResult["refs"] = [];
@@ -138,6 +156,7 @@ export class T3Api {
         projectCwd: spec.newWorktree.projectCwd,
         baseBranch: spec.newWorktree.baseBranch,
         requireWorktree: true,
+        ...(spec.newWorktree.startFromOrigin === undefined ? {} : { startFromOrigin: spec.newWorktree.startFromOrigin }),
         ...(spec.newWorktree.branch ? { branch: spec.newWorktree.branch } : {}),
       };
       bootstrap.runSetupScript = spec.newWorktree.runSetupScript;
