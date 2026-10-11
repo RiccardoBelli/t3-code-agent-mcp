@@ -286,6 +286,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
       const existing = shell.threads.find((t) => t.id === ids.threadId);
       let expectsFreshWorktree = !!input.newWorktree;
+      let expectedFreshBranch = input.newWorktree ? input.newWorktree.branch ?? `t3code-${ids.threadId}` : undefined;
       if (existing) {
         if (existing.projectId !== project.id || existing.modelSelection.instanceId !== harness.instanceId || existing.modelSelection.model !== model.slug) {
           throw new Error("idempotencyKey belongs to a different launch. Read the existing thread; do not reuse this key for another request.");
@@ -323,6 +324,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             );
           }
           branch = requestedWorktree.branch ?? `t3code-${ids.threadId}`;
+          expectedFreshBranch = branch;
           newWorktree = {
             projectCwd: project.workspaceRoot,
             baseBranch: base.name,
@@ -361,7 +363,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           : existing || expectsFreshWorktree ? launched.worktreePath : null;
         const mismatch = launched.projectId !== project.id || launched.worktreePath !== expectedPath || currentBranch !== launched.branch ||
           (expectsFreshWorktree && !launched.worktreePath) ||
-          (input.newWorktree?.branch && launched.branch !== input.newWorktree.branch);
+          (expectedFreshBranch && launched.branch !== expectedFreshBranch);
         if (mismatch) {
           if (launched.latestTurn) await api.interruptTurn(randomUUID(), ids.threadId, launched.latestTurn.turnId);
           throw new Error(`Thread ${ids.threadId} has an unexpected branch or working directory; interrupted. Read the thread before continuing.`);

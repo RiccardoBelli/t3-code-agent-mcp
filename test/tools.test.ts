@@ -290,10 +290,10 @@ describe("inherited worktree launches", () => {
   it.each([["local", undefined, false], ["worktree", "local", false], ["local", "worktree", true], ["worktree", undefined, true]] as const)("global %s, project %s creates fresh=%s", async (mode, override, fresh) => {
     const ids = commandIds("launch", "inherit");
     const created: unknown[] = [];
-    const launched = { ...threadShell(ids.threadId, { turnId: "T", state: "running", startedAt: "", completedAt: null, assistantMessageId: null }), ...(fresh ? { branch: "auto", worktreePath: "C:/code/proj-auto" } : {}) };
+    const launched = { ...threadShell(ids.threadId, { turnId: "T", state: "running", startedAt: "", completedAt: null, assistantMessageId: null }), ...(fresh ? { branch: `t3code-${ids.threadId}`, worktreePath: "C:/code/proj-auto" } : {}) };
     const call = harness({
       shell: async () => shell([]), config: async () => ({ providers: [provider] }), settings: async () => defaults(mode, override),
-      listRefs: async (cwd) => cwd.endsWith("proj-auto") ? { ...refs, refs: [{ name: "auto", current: true, isDefault: false, worktreePath: cwd }] } : refs,
+      listRefs: async (cwd) => cwd.endsWith("proj-auto") ? { ...refs, refs: [{ name: `t3code-${ids.threadId}`, current: true, isDefault: false, worktreePath: cwd }] } : refs,
       createThreadWithFirstTurn: async (spec) => { created.push(spec); return { sequence: 1 }; }, thread: async () => detail(launched),
     });
     expect((await call("t3_create_thread", base("inherit"))).error).toBeUndefined();
