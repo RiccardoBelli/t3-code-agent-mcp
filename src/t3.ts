@@ -137,6 +137,7 @@ export class T3Api {
       bootstrap.prepareWorktree = {
         projectCwd: spec.newWorktree.projectCwd,
         baseBranch: spec.newWorktree.baseBranch,
+        requireWorktree: true,
         ...(spec.newWorktree.branch ? { branch: spec.newWorktree.branch } : {}),
       };
       bootstrap.runSetupScript = spec.newWorktree.runSetupScript;

@@ -5,7 +5,10 @@ import type { ProjectShell, Provider, ProviderModel, VcsRef } from "./types.js";
  * asked for or throws an error that lists the valid choices. Nothing here
  * ever picks a default or a "close enough" alternative on the caller's behalf.
  */
-export const normalizePath = (value: string): string => value.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+export const normalizePath = (value: string): string => {
+  const path = value.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
+};
 
 export function resolveProject(projects: ProjectShell[], ref: string): ProjectShell {
   const wanted = ref.trim();

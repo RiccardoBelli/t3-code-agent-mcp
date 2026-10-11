@@ -97,7 +97,7 @@ describe("t3_create_thread", () => {
     expect(calls[0]).toMatchObject({ threadId: ids.threadId, commandId: ids.commandId, branch: "main", worktreePath: null });
   });
 
-  it("finishes a half-launched thread (exists, no turn) instead of calling it reused", async () => {
+  it("does not bypass an unfinished worktree bootstrap on retry", async () => {
     const ids = commandIds("launch", "k2");
     const started: unknown[] = [];
     const call = harness({
@@ -114,8 +114,7 @@ describe("t3_create_thread", () => {
     });
     const result = await call("t3_create_thread", base("k2"));
     expect(result.reused).toBe(true);
-    expect(started).toHaveLength(1);
-    expect(started[0]).toMatchObject({ commandId: ids.commandId, messageId: ids.messageId, threadId: ids.threadId });
+    expect(started).toHaveLength(0);
   });
 
   it("reuses a launched thread without dispatching anything, and honours wait", async () => {
@@ -130,6 +129,8 @@ describe("t3_create_thread", () => {
       createThreadWithFirstTurn: async () => {
         throw new Error("must not dispatch");
       },
+      thread: async () => detail(threadShell(ids.threadId, turn)),
+      listRefs: async () => refs,
       waitForTurnSettled: async () => ({
         snapshot: detail(threadShell(ids.threadId, turn), [
           { id: "a1", role: "assistant", text: "PONG", turnId: "T", streaming: false, createdAt: "" },

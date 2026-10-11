@@ -247,7 +247,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           .describe("Ask T3 to create a fresh worktree for this thread. Mutually exclusive with worktreePath."),
         runtimeMode: RuntimeModeSchema.optional().describe("Default full-access"),
         interactionMode: InteractionModeSchema.optional().describe("Default 'default'; 'plan' asks for a plan first"),
-        idempotencyKey: z.string().optional().describe("Stable key; retries with the same key reuse the same thread instead of launching again"),
+        idempotencyKey: z.string().trim().min(1).describe("Stable key; retries with the same key reuse the same thread instead of launching again"),
         wait: z.boolean().optional().describe("Wait for the first turn to finish and return the reply (default false)"),
         timeoutSeconds: z.number().int().min(1).max(3600).optional().describe("Max wait when wait=true (default 300)"),
       },
@@ -265,12 +265,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
 
       const existing = shell.threads.find((t) => t.id === ids.threadId);
       if (existing) {
-        // T3's bootstrap is a chain (create thread, then start the turn). If it
-        // broke between the two, the thread exists with no turn: finish the
-        // launch with the same command id rather than reporting a reuse.
-        if (!existing.latestTurn) {
-          await api.startTurn({ ...ids, text, runtimeMode: existing.runtimeMode, interactionMode: existing.interactionMode });
+        if (existing.projectId !== project.id || existing.modelSelection.instanceId !== harness.instanceId || existing.modelSelection.model !== model.slug) {
+          throw new Error("idempotencyKey belongs to a different launch. Read the existing thread; do not reuse this key for another request.");
         }
+        if (existing.latestTurn && ((input.worktreePath && normalizePath(existing.worktreePath ?? project.workspaceRoot) !== normalizePath(input.worktreePath)) ||
+          (input.newWorktree && (!existing.worktreePath || (input.newWorktree.branch && existing.branch !== input.newWorktree.branch))))) {
+          throw new Error("idempotencyKey belongs to a different worktree launch. Read the existing thread before continuing.");
+        }
+        // No turn can mean T3 is still preparing a worktree. Never bypass its bootstrap.
       } else {
         const refs = await api.listRefs(project.workspaceRoot);
         let branch: string | null = null;
@@ -312,6 +314,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         });
       }
 
+      const launched = (await api.thread(ids.threadId, 1)).thread;
+      // A retry may observe an unfinished bootstrap. Report it, without starting another turn.
+      if (launched.latestTurn) {
+        const cwd = launched.worktreePath ?? project.workspaceRoot;
+        const actual = await api.listRefs(cwd);
+        const currentBranch = actual.refs.find((r) => r.current && !r.isRemote)?.name ?? null;
+        const expectedPath = input.newWorktree ? launched.worktreePath : resolveExistingWorktree(project, (await api.listRefs(project.workspaceRoot)).refs, input.worktreePath ?? project.workspaceRoot).worktreePath;
+        const mismatch = launched.projectId !== project.id || launched.worktreePath !== expectedPath || currentBranch !== launched.branch ||
+          (input.newWorktree && (!launched.worktreePath || (input.newWorktree.branch && launched.branch !== input.newWorktree.branch)));
+        if (mismatch) {
+          await api.interruptTurn(randomUUID(), ids.threadId, launched.latestTurn.turnId);
+          throw new Error(`Thread ${ids.threadId} has an unexpected branch or working directory; interrupted. Read the thread before continuing.`);
+        }
+      }
+
       const base = { reused: existing !== undefined, idempotencyKey: ids.idempotencyKey };
       if (input.wait) {
         const { snapshot, timedOut } = await api.waitForTurnSettled(ids.threadId, (input.timeoutSeconds ?? WAIT_DEFAULT_SECONDS) * 1000, {
@@ -336,13 +353,14 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
         context: ContextSchema,
         runtimeMode: RuntimeModeSchema.optional().describe("Default: the thread's current mode"),
         interactionMode: InteractionModeSchema.optional().describe("Default: the thread's current mode"),
-        idempotencyKey: z.string().optional().describe("Stable key; retries with the same key do not start a second turn"),
+        idempotencyKey: z.string().trim().min(1).describe("Stable key; retries with the same key do not start a second turn"),
         wait: z.boolean().optional().describe("Wait for the turn to finish and return the reply (default false)"),
         timeoutSeconds: z.number().int().min(1).max(3600).optional().describe("Max wait when wait=true (default 300)"),
       },
     },
     async (input) => {
       const before = await api.thread(input.threadId);
+      if (!before.thread.latestTurn) throw new Error("The first turn has not started. T3 may still be preparing the worktree; read its status and wait before sending a follow-up.");
       const ids = commandIds(input.threadId, input.idempotencyKey);
       const alreadySent = before.thread.messages.some((m) => m.id === ids.messageId);
       // No "turn is running" guard on purpose: T3 accepts thread.turn.start

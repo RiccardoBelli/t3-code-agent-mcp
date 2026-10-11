@@ -101,3 +101,8 @@ describe("resolveExistingWorktree", () => {
     expect(() => resolveExistingWorktree(proj, refs, "C:\\elsewhere")).toThrow(/t3-wt\\x \(feature\/x\)/);
   });
 });
+
+ it("keeps Linux worktree paths case sensitive", () => {
+   const proj = project("p", "linux", "/home/riccardo/Work/repo");
+   expect(() => resolveExistingWorktree(proj, [], "/home/riccardo/work/repo")).toThrow(/not a worktree/);
+ });
