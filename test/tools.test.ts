@@ -192,3 +192,92 @@ describe("t3_list_worktrees", () => {
     expect(result.worktrees.map((w: { worktreePath: string }) => w.worktreePath)).toEqual(["C:\\code\\proj", "C:\\code\\proj-feat"]);
   });
 });
+
+
+describe("bridge model defaults", () => {
+  const opus = {
+    slug: "claude-opus-5-5", name: "Claude Opus 5.5",
+    capabilities: { optionDescriptors: [{ id: "effort", type: "select", options: [{ id: "medium" }, { id: "high" }] }] },
+  };
+
+  it("uses Opus 5.5 medium when harness and model are omitted", async () => {
+    let selection;
+    const call = harness({
+      shell: async () => shell([]),
+      config: async () => ({ providers: [{ ...provider, models: [opus] }] }),
+      listRefs: async () => refs,
+      createThreadWithFirstTurn: async (spec) => {
+        selection = spec.modelSelection;
+        return { sequence: 1 };
+      },
+      thread: async () => detail(threadShell("t", null)),
+    });
+    const result = await call("t3_create_thread", { project: "p1", title: "T", prompt: "go", idempotencyKey: "default" });
+    expect(result.error).toBeUndefined();
+    expect(selection).toEqual({ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "medium" }] });
+  });
+
+  it("honours an explicit effort and rejects an unsupported one before launch", async () => {
+    const selections: unknown[] = [];
+    const call = harness({
+      shell: async () => shell([]),
+      config: async () => ({ providers: [{ ...provider, models: [opus] }] }),
+      listRefs: async () => refs,
+      createThreadWithFirstTurn: async (spec) => {
+        selections.push(spec.modelSelection);
+        return { sequence: 1 };
+      },
+      thread: async () => detail(threadShell("t", null)),
+    });
+    const args = { project: "p1", title: "T", prompt: "go", idempotencyKey: "effort" };
+    expect((await call("t3_create_thread", { ...args, effort: "high" })).error).toBeUndefined();
+    expect(selections).toEqual([{ instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] }]);
+    expect((await call("t3_create_thread", { ...args, effort: "not-supported" })).error).toMatch(/not offered/);
+    expect(selections).toHaveLength(1);
+  });
+
+  it("requires an explicit model for a non-default harness", async () => {
+    const call = harness({
+      shell: async () => shell([]),
+      config: async () => ({ providers: [{ ...provider, instanceId: "codex", driver: "codex" }] }),
+      createThreadWithFirstTurn: async () => { throw new Error("must not launch"); },
+    });
+    const result = await call("t3_create_thread", { project: "p1", harness: "codex", title: "T", prompt: "go", idempotencyKey: "other" });
+    expect(result.error).toMatch(/explicit model/);
+  });
+});
+
+describe("thread settlement", () => {
+  it("reads the accepted command's state and scopes settle and unsettle retry keys separately", async () => {
+    const calls: unknown[] = [];
+    let settled = false;
+    let reads = 0;
+    const call = harness({
+      setThreadSettled: async (...args) => {
+        calls.push(args);
+        settled = args[2];
+        reads = 0;
+        return { sequence: 2 };
+      },
+      thread: async () => ({
+        snapshotSequence: ++reads === 1 ? 1 : 2,
+        thread: { ...detail(threadShell("t1", null)).thread, settledAt: settled ? "2026-10-11T00:00:00Z" : null, settledOverride: settled ? "settled" : "active" },
+      }),
+    });
+    const args = { threadId: "t1", idempotencyKey: "state" };
+    expect((await call("t3_settle_thread", args)).settled).toBe(true);
+    expect((await call("t3_unsettle_thread", args)).settled).toBe(false);
+    expect(calls).toEqual([
+      [commandIds("t3_settle_thread:t1", "state").commandId, "t1", true],
+      [commandIds("t3_unsettle_thread:t1", "state").commandId, "t1", false],
+    ]);
+  });
+
+  it("leaves a running thread alone when T3 rejects settlement", async () => {
+    const call = harness({
+      setThreadSettled: async () => { throw new Error("Thread is running"); },
+      interruptTurn: async () => { throw new Error("must not interrupt"); },
+    });
+    expect((await call("t3_settle_thread", { threadId: "busy", idempotencyKey: "settle-busy" })).error).toBe("Thread is running");
+  });
+});

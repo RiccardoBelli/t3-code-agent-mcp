@@ -8,7 +8,7 @@
 export interface ModelSelection {
   instanceId: string;
   model: string;
-  options?: Record<string, unknown>;
+  options?: Array<{ id: string; value: string | boolean }>;
 }
 
 export type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
@@ -47,6 +47,8 @@ export interface ThreadShell {
   latestTurn: LatestTurn | null;
   updatedAt: string;
   archivedAt: string | null;
+  settledAt?: string | null;
+  settledOverride?: "settled" | "active" | null;
   session: Session | null;
   hasPendingApprovals: boolean;
   hasPendingUserInput: boolean;
@@ -104,6 +106,9 @@ export interface ProviderModel {
   aliases?: string[];
   isDefault?: boolean;
   isLegacy?: boolean;
+  capabilities?: {
+    optionDescriptors?: Array<{ id: string; type: string; options?: Array<{ id: string }> }>;
+  };
 }
 
 export interface Provider {

@@ -168,6 +168,15 @@ export class T3Api {
     });
   }
 
+  setThreadSettled(commandId: string, threadId: string, settled: boolean): Promise<DispatchResult> {
+    return this.dispatch({
+      type: settled ? "thread.settle" : "thread.unsettle",
+      commandId,
+      threadId,
+      ...(settled ? {} : { reason: "user" }),
+    });
+  }
+
   interruptTurn(commandId: string, threadId: string, turnId?: string): Promise<DispatchResult> {
     return this.dispatch({
       type: "thread.turn.interrupt",

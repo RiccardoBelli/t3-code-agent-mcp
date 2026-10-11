@@ -8,7 +8,10 @@ import { commandIds } from "./ids.js";
 import { registerOrchestrationPromptTool } from "./prompts.js";
 import { normalizePath, resolveExistingWorktree, resolveHarness, resolveModel, resolveProject, unusableReason } from "./resolve.js";
 import type { T3Api } from "./t3.js";
-import type { Message, ThreadDetailSnapshot, ThreadShell } from "./types.js";
+import type { Message, ModelSelection, ThreadDetailSnapshot, ThreadShell } from "./types.js";
+
+const DEFAULT_HARNESS = "claudeAgent";
+const DEFAULT_MODEL = "claude-opus-5-5";
 
 const RuntimeModeSchema = z.enum(["approval-required", "auto-accept-edits", "auto", "full-access"]);
 const InteractionModeSchema = z.enum(["default", "plan"]);
@@ -32,6 +35,7 @@ const summarizeThread = (thread: ThreadShell | ThreadDetailSnapshot["thread"], c
   projectId: thread.projectId,
   harness: thread.modelSelection.instanceId,
   model: thread.modelSelection.model,
+  modelOptions: thread.modelSelection.options ?? [],
   branch: thread.branch,
   worktreePath: thread.worktreePath,
   runtimeMode: thread.runtimeMode,
@@ -46,6 +50,9 @@ const summarizeThread = (thread: ThreadShell | ThreadDetailSnapshot["thread"], c
     : null,
   session: thread.session ? { status: thread.session.status, lastError: thread.session.lastError } : null,
   archived: thread.archivedAt !== null,
+  settled: thread.settledAt != null,
+  settledAt: thread.settledAt ?? null,
+  settledOverride: thread.settledOverride ?? null,
   ...("hasPendingApprovals" in thread
     ? {
         needsAttention: {
@@ -190,6 +197,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
             aliases: m.aliases,
             isDefault: m.isDefault ?? false,
             isLegacy: m.isLegacy ?? false,
+            options: m.capabilities?.optionDescriptors ?? [],
           })),
         }));
     },
@@ -225,11 +233,12 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     {
       title: "Create a T3 thread and send the first prompt",
       description:
-        "Create a new thread in T3 with an explicit project, worktree, harness, and model, then send the first prompt. The thread appears in the T3 UI. Nothing is substituted: unknown or unusable choices fail with the valid options. Pass the same idempotencyKey on retries to guarantee a single launch; a key whose command T3 rejected is burned and needs a new key.",
+        "Create a new thread in T3, then send the first prompt. Defaults to claudeAgent / claude-opus-5-5 with medium effort. Explicit harness and model choices override these defaults. The thread appears in the T3 UI. Nothing is substituted: unknown or unusable choices fail with the valid options. Pass the same idempotencyKey on retries to guarantee a single launch; a key whose command T3 rejected is burned and needs a new key.",
       inputSchema: {
         project: z.string().describe("Project id, exact title, or workspace root (see t3_list_projects)"),
-        harness: z.string().describe("Harness id exactly as listed by t3_list_harnesses, e.g. claudeAgent, codex, cursor"),
-        model: z.string().describe("Model slug or alias exactly as listed for that harness"),
+        harness: z.string().optional().describe("Harness id from t3_list_harnesses. Default claudeAgent; other harnesses require an explicit model."),
+        model: z.string().optional().describe("Model slug or alias from t3_list_harnesses. Default claude-opus-5-5 for claudeAgent."),
+        effort: z.string().trim().min(1).optional().describe("Claude reasoning effort from the model option choices. Default medium for claude-opus-5-5."),
         title: z.string().min(1).describe("Thread title shown in T3"),
         prompt: z.string().min(1).describe("First user message"),
         context: ContextSchema.describe("Extra context blocks appended below the prompt"),
@@ -256,8 +265,19 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (input.worktreePath && input.newWorktree) throw new Error("Pass either worktreePath or newWorktree, not both.");
       const [shell, config] = await Promise.all([api.shell(), api.config()]);
       const project = resolveProject(shell.projects, input.project);
-      const harness = resolveHarness(config.providers, input.harness);
-      const model = resolveModel(harness, input.model);
+      const harness = resolveHarness(config.providers, input.harness ?? DEFAULT_HARNESS);
+      const requestedModel = input.model ?? (harness.instanceId === DEFAULT_HARNESS ? DEFAULT_MODEL : undefined);
+      if (!requestedModel) throw new Error("Pass an explicit model when selecting another harness. Use t3_list_harnesses.");
+      const model = resolveModel(harness, requestedModel);
+      const effort = input.effort ?? (harness.driver === "claudeAgent" && model.slug === DEFAULT_MODEL ? "medium" : undefined);
+      const modelSelection: ModelSelection = { instanceId: harness.instanceId, model: model.slug };
+      if (effort) {
+        const option = model.capabilities?.optionDescriptors?.find((d) => d.id === "effort" && d.type === "select");
+        if (harness.driver !== "claudeAgent" || !option?.options?.some((o) => o.id === effort)) {
+          throw new Error(`Effort "${effort}" is not offered by ${harness.instanceId}/${model.slug}. Use t3_list_harnesses for model options.`);
+        }
+        modelSelection.options = [{ id: "effort", value: effort }];
+      }
       const ids = commandIds("launch", input.idempotencyKey);
       const runtimeMode = input.runtimeMode ?? "full-access";
       const interactionMode = input.interactionMode ?? "default";
@@ -304,7 +324,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
           ...ids,
           projectId: project.id,
           title: input.title,
-          modelSelection: { instanceId: harness.instanceId, model: model.slug },
+          modelSelection,
           runtimeMode,
           interactionMode,
           branch,
@@ -427,6 +447,36 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       return turnResult(snapshot, ctx, timedOut);
     },
   );
+
+  for (const [name, settled] of [["t3_settle_thread", true], ["t3_unsettle_thread", false]] as const) {
+    tool(
+      server,
+      name,
+      {
+        title: settled ? "Settle a T3 thread" : "Mark a settled thread active",
+        description: settled
+          ? "Mark a thread done in T3's sidebar and close its idle session. T3 rejects settling running or preparing work and blocked requests. This never interrupts a running turn. Retry with the same idempotencyKey."
+          : "Undo settlement and mark the thread active in T3's sidebar. Does not launch an agent or send a message. Retry with the same idempotencyKey.",
+        inputSchema: {
+          threadId: z.string(),
+          idempotencyKey: z.string().trim().min(1).describe("Stable key for this operation; reuse it on retries"),
+        },
+      },
+      async ({ threadId, idempotencyKey }) => {
+        const ids = commandIds(`${name}:${threadId}`, idempotencyKey);
+        const receipt = await api.setThreadSettled(ids.commandId, threadId, settled);
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const snapshot = await api.thread(threadId, 1);
+          if (snapshot.snapshotSequence >= receipt.sequence) {
+            if (!("settledAt" in snapshot.thread)) throw new Error("T3 did not return thread settlement status. Its contract may have changed.");
+            return { idempotencyKey: ids.idempotencyKey, ...summarizeThread(snapshot.thread, ctx) };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error("T3 accepted the settlement command but its status is not available yet. Read the thread or retry with the same idempotencyKey.");
+      },
+    );
+  }
 
   tool(
     server,
